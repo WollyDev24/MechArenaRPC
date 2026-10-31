@@ -1,5 +1,15 @@
 # Mech Arena Discord Rich Presence
 
+<p align="center">
+  <img src="assets/MechArenaRPC.png" alt="Mech Arena RPC Banner" style="max-width: 100%; height: auto;">
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.10+-blue?style=flat-square&logo=python" alt="Python">
+  <img src="https://img.shields.io/badge/Platform-Linux-orange?style=flat-square&logo=linux" alt="Linux">
+  <img src="https://img.shields.io/badge/Tray-AppIndicator-cyan?style=flat-square" alt="AppIndicator">
+</p>
+
 A small Linux tray daemon that shows what you are doing in **Mech Arena** as **Discord Rich Presence**. It detects the game running under Wine/Proton, watches whether you are in the hangar or in a match, and can read the in-match HUD to tell **Deathmatch**, **Control Point Clash**, and **Free-For-All** apart.
 
 > Unofficial fan project. Not affiliated with Plarium or Discord. Use at your own risk.
