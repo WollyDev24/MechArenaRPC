@@ -33,8 +33,8 @@ A lightweight Linux tray daemon that displays your live **Mech Arena** status as
 The included `setup.sh` script automatically detects your distribution (Arch, Fedora, Ubuntu/Debian, openSUSE), installs required system packages (`imagemagick`, `xwininfo`, `libappindicator`), and prepares a pre-configured Python virtual environment:
 
 ```bash
-git clone [https://github.com/wollydev24/DiscordRPC.git](https://github.com/wollydev24/DiscordRPC.git)
-cd DiscordRPC
+git clone https://github.com/wollydev24/MechArenaRPC
+cd MechArenaRPC
 
 chmod +x setup.sh
 ./setup.sh
