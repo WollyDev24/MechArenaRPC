@@ -1,7 +1,7 @@
 # Mech Arena Discord Rich Presence
 
 <p align="center">
-  <img src="MechArenaRPC.png" alt="Mech Arena RPC Banner" style="max-width: 100%; height: auto;">
+  <img src="assets/MechArenaRPC.png" alt="Mech Arena RPC Banner" style="max-width: 100%; height: auto;">
 </p>
 
 <p align="center">
