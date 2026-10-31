@@ -4,7 +4,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="${SCRIPT_DIR}/.venv"
 
-echo "=== Mech Arena Discord RPC Setup ==="
+echo "Needed dependencies for the Mech Arena RPC :3"
 
 # 1. Identify distro using /etc/os-release
 if [ ! -f /etc/os-release ]; then
