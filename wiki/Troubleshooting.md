@@ -23,11 +23,14 @@ find "$XDG_RUNTIME_DIR" -name 'discord-ipc-*' 2>/dev/null
 # 5. Is the daemon running?
 pgrep -af RPCA.py
 
-# 6. What does it say?
+# 6. What config is it using?
+.venv/bin/python RPCA.py --print-config | head -20
+
+# 7. What does it say?
 tail -n 100 ~/.cache/mech_arena_rpc.log
 ```
 
-If step 1–3 fail, the problem is the game/XWayland environment, not the daemon. If step 4 fails, it is Discord IPC. If only step 6 shows capture failures, it is the HUD crop.
+If step 1–3 fail, the problem is the game/XWayland environment, not the daemon. If step 4 fails, it is Discord IPC. If only step 7 shows capture failures, it is the HUD crop. If step 6 looks wrong, see [Config changes have no effect](#config-changes-have-no-effect).
 
 ---
 
@@ -79,6 +82,58 @@ Also make sure the daemon is not crashing after creating the icon. Run it in the
 
 ---
 
+## Config changes have no effect
+
+### Where is the config?
+
+```bash
+ls -l ~/.config/mech-arena-rpc/config.toml
+.venv/bin/python RPCA.py --print-config | head -20
+```
+
+`--print-config` prints the **merged** result: CLI overrides, then file, then defaults. If the printed value is not what you edited, you are probably editing a different file. Use `--config PATH` or check `XDG_CONFIG_HOME`.
+
+### Did the daemon reload it?
+
+Editing the file does nothing until you choose tray → **Reload Config**. A restart also works. The log prints `Configuration reloaded from …` on success.
+
+### Are there validation warnings?
+
+```bash
+grep 'Config:' ~/.cache/mech_arena_rpc.log | tail -20
+```
+
+Invalid values and unknown keys are logged and replaced with defaults. Common causes:
+
+| Warning | Meaning |
+| --- | --- |
+| `invalid crop geometry ...` | Use `WxH+X+Y`, e.g. `440x45+740+50`. |
+| `is above 255` / `is below ...` | A threshold or timing value is out of range. |
+| `unknown setting ignored` | Typo or a key that belongs under a different table. |
+| `expected a table` | A `[section]` header is wrong or duplicated. |
+| `created default config at ...` | First run; the file did not exist yet. |
+
+### TOML syntax errors
+
+A parse error makes the daemon fall back to built-in defaults and log the exception. Validate with:
+
+```bash
+.venv/bin/python - <<'PY'
+import tomllib, pathlib
+print(tomllib.loads(pathlib.Path('~/.config/mech-arena-rpc/config.toml').expanduser().read_text()))
+PY
+```
+
+### Buttons
+
+Discord rejects more than two buttons. Extra entries are ignored with a warning. Each URL must start with `http://` or `https://`; a `label` is required.
+
+### Python 3.10
+
+`settings.py` uses `tomllib` on Python 3.11+. On 3.10 it needs `tomli`; `setup.sh` installs it. Without either, the daemon logs a warning and uses defaults.
+
+---
+
 ## Discord presence never appears
 
 ### Is Discord running?
@@ -108,9 +163,10 @@ Sandboxed Discord may have a private `XDG_RUNTIME_DIR` and expose the socket som
 
 ### Client ID or asset problem
 
-- `InvalidID` in the log means the `CLIENT_ID` is rejected. Restore the default or create your own app.
-- If the card appears but the large image is blank, upload an asset named `mech_arena_logo` or change `large_image`.
+- `InvalidID` in the log means `discord.client_id` is rejected. Restore the default or create your own app.
+- If the card appears but the large image is blank, upload an asset named `mech_arena_logo` or change `discord.large_image`.
 - Buttons may not render on all clients; that is a Discord limitation.
+- `MechArena.py` does not read the config file; change its hardcoded values separately.
 
 ### Smoke test
 
@@ -148,7 +204,7 @@ If this fails, fix Discord IPC before touching the daemon.
 pgrep -af -i mecharena
 ```
 
-The code matches `"mecharena.exe" in name.lower()`. Wine usually reports `MechArena.exe`. If your setup reports something else, adjust the string in `get_mech_state()`.
+The code matches the `name` set in `[process]` (default `"mecharena.exe"`) as a case-insensitive substring. Wine usually reports `MechArena.exe`. If your setup reports something else, change the config and reload:
 
 ### Permission errors
 
@@ -201,16 +257,27 @@ They share the same `get_mech_state()`. If one works and the other does not, the
 xwininfo -root -tree | grep -i 'Mech Arena'
 ```
 
-If nothing matches, `get_mech_window_id()` returns `None` and detection silently retries. Check the exact title (case-sensitive `"Mech Arena"`).
+If nothing matches, `get_mech_window_id()` returns `None` and detection silently retries. Check the exact title against `[window] title` (case-sensitive `"Mech Arena"` by default).
 
 ### Is the crop correct?
+
+The easiest check is the calibration wizard:
+
+```bash
+.venv/bin/python RPCA.py --calibrate
+calibrate> test
+```
+
+It prints `Center`, `Edge`, `Ratio`, the current verdict, and an ASCII preview. Use `preview` and `open` to see the crop outlined on the full window.
+
+Manual check:
 
 ```bash
 WIN=$(xwininfo -root -tree | awk '/"Mech Arena"/ {print $1; exit}')
 import -window "$WIN" -crop 440x45+740+50 /tmp/hud.png
 ```
 
-Open `/tmp/hud.png`. It must show the score/beacon strip. If it shows empty sky or another HUD element, recalibrate `HUD_CROP_GEOM`.
+The geometry must match `[hud] crop`. Open `/tmp/hud.png`; it must show the score/beacon strip. If it shows empty sky or another HUD element, recalibrate.
 
 See [Mode Detection → Calibration](Mode-Detection.md#calibration).
 
@@ -220,18 +287,17 @@ That means the heuristics returned the fallback (or detection never locked and t
 
 - If there are no `HUD Analysis` lines, the capture or window lookup is failing. Look for `HUD lookup failed (attempt X/4); retrying in 2s...` and `HUD lookup failed after 4 attempts` in the log.
 - If there are lines but no `Locked Mode` line, the fallback was returned.
-- If the analysis values are all near zero, the capture is black.
+- If the analysis values are all near zero, the capture is black or `min_brightness` is rejecting it.
 
 ### Is it always "Deathmatch"?
 
-A fully black capture has `center = edge = 0`. `edge_avg` is clamped to `1.0`, `ratio` becomes `0.0`, and the DM branch matches. This usually means the window is minimised or the capture is blocked. Keep the game visible.
+Older code treated a fully black capture as Deathmatch (`ratio = 0.0`). Current code has a `min_brightness` guard (default `5`): a frame where both centre and edge are below it returns `None` and is retried instead.
 
-You can add a guard:
+If you still see false Deathmatch:
 
-```python
-if max(center_avg, edge_avg) < 5:
-    return None
-```
+- Check the log values. If `edge >= edge_min_deathmatch` on genuine menu/intro frames, raise `edge_min_deathmatch`.
+- If the ratio is low on non-DM frames, lower `ratio_max_deathmatch` (e.g. `0.80`).
+- Set `min_brightness = 0` only if you deliberately want to disable the guard.
 
 ### "In Battle (In Battle)"
 
@@ -244,7 +310,7 @@ if detected and detected != "In Battle":
 
 ### The mode is correct but appears late
 
-`MODE_LOCK_DELAY = 15` plus the 2-second poll means 15–17 seconds. Lower it if you accept intro-frame risk; raise it for reliability.
+`hud.mode_lock_delay` (default `15`) plus `timing.poll_interval` (default 2 seconds) means 15–17 seconds. Lower it if you accept intro-frame risk; raise it for reliability. A failed lookup burst adds up to `lookup_retries * lookup_retry_delay` seconds (6 by default).
 
 ### The mode changes during the match
 
@@ -252,7 +318,13 @@ You are probably running `TestingTools/RPCdaemon.py`, which re-detects every pol
 
 ### Wrong mode for your resolution
 
-The default crop is for 1920×1080 at 100% UI scale. Scale the geometry or recalibrate with `TestingTools/DumpStrip.py`.
+The default crop is for 1920×1080 at 100% UI scale. Run the calibration wizard and try `auto`, then nudge. See [Mode Detection → Calibration](Mode-Detection.md#calibration).
+
+### The wizard will not start
+
+- **Calibrate HUD** needs a terminal emulator from `TERMINAL_COMMANDS`. If none is found, the log prints the exact command.
+- `RPCA.py --calibrate` with redirected stdin prints `The calibration wizard needs an interactive terminal` and exits 1. Run it from a real terminal.
+- If captures fail inside the wizard, the game is minimised or `[window] title` does not match. Run `xwininfo -root -tree`.
 
 ### Window is in a Wine virtual desktop
 

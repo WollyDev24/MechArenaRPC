@@ -16,8 +16,10 @@ This page describes the runtime structure of `RPCA.py`, the flow of data from th
 │  │  pystray event loop  │        │  while is_running:           │  │
 │  │  ├─ tray icon        │        │    get_mech_state()          │  │
 │  │  ├─ status menu item │◄───────┤    maybe detect_hud_mode()   │  │
-│  │  ├─ Show Log         │ status │    rpc.update() / clear()    │  │
-│  │  ├─ Dispatch         │        │    sleep(2)                  │  │
+│  │  ├─ Reload/Open cfg  │ status │    rpc.update() / clear()    │  │
+│  │  ├─ Calibrate HUD    │        │    sleep(poll_interval)      │  │
+│  │  ├─ Show Log         │        │                              │  │
+│  │  ├─ Dispatch         │        │                              │  │
 │  │  └─ Quit             │        │                              │  │
 │  └─────────────────────┘        └──────────────┬───────────────┘  │
 │                                                 │                  │
@@ -31,6 +33,10 @@ This page describes the runtime structure of `RPCA.py`, the flow of data from th
      │ psutil process   │              │ import + xwininfo│     │ IPC socket      │
      │ + UDP sockets    │              │ HUD screenshot   │     │ (pypresence)    │
      └─────────────────┘              └──────────────────┘     └─────────────────┘
+
+     ┌───────────────────────────────────────────────────────────────┐
+     │ settings.py: Config defaults, validation, TOML, CLI overrides │
+     └───────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -73,14 +79,36 @@ This is a deliberately small amount of shared state. No queues and no condition 
 `RPCA.py` executes a few things **before** importing the heavy modules:
 
 1. **Ignore `SIGHUP`** so a closed terminal does not kill the process.
-2. **Detect `--detached`** in `sys.argv`.
+2. **Detect `--detached`** in `sys.argv`, plus `--print-config` / `--calibrate` (`cli_mode`).
 3. If detached, open `/dev/null` and replace stdin/stdout/stderr file descriptors with it.
 4. Set `PYSTRAY_BACKEND=appindicator` so pystray chooses the AppIndicator backend.
-5. Import the rest (`psutil`, PIL, pystray, pypresence).
-6. Define functions and globals.
-7. In `main()`, build the tray, start the worker, and enter the tray loop.
+5. Import the rest (`psutil`, PIL, pystray, pypresence, `settings`).
+6. Load the config, then copy every value into module globals through `apply_config()`.
+7. Define functions and globals.
+8. In `main()`, handle `--print-config` / `--calibrate` and exit, or build the tray, start the worker, and enter the tray loop.
 
 The ordering matters. In particular, `PYSTRAY_BACKEND` must be set before `import pystray`, and the stdio redirection must happen before any library writes output.
+
+### Configuration flow
+
+```
+defaults (settings.Config)
+        │
+        ├── config.toml (created on first launch)
+        │        │
+        │        └── validation warnings for bad/unknown keys
+        │
+        ├── CLI overrides (--crop, --retries, ...)
+        │
+        ▼
+   Config object ──► apply_config() ──► module globals (CLIENT_ID, HUD_CROP_GEOM, ...)
+        │
+        └── works at runtime: it formats presence payloads and drives the capture
+```
+
+`reload_config()` reruns the same load pipeline and calls `apply_config()` again, so **Reload Config** takes effect on the next worker poll. **Restart / Apply Update** and **Dispatch** carry config-related CLI flags forward via `persistent_cli_args()`.
+
+`--print-config` runs the same load and prints the merged result without opening the tray. `--calibrate` runs the interactive wizard instead of the daemon.
 
 ### Detached environment
 
@@ -88,12 +116,12 @@ The ordering matters. In particular, `PYSTRAY_BACKEND` must be set before `impor
 | --- | --- | --- |
 | stdin/stdout/stderr | Terminal | `/dev/null` |
 | `is_detached` | `False` | `True` |
-| Console logging | Yes | No |
+| Console logging | Yes (unless `cli_mode`) | No |
 | File logging | Yes | Yes |
 | Tray menu "Dispatch" | Enabled | Disabled |
 | Parent session | Current shell | New session via `start_new_session=True` |
 
-`log()` checks `is_detached` before printing. File logging always happens, with a timestamp and a maximum of one line per call.
+`log()` checks `is_detached` and `cli_mode` before printing. File logging always happens, with a timestamp and a maximum of one line per call.
 
 ---
 
@@ -115,20 +143,21 @@ Implemented by `get_mech_state()`. See [Game State Detection](Game-State-Detecti
 ### 2. HUD mode (battle only)
 
 ```
-state == BATTLE and (now - battle_start) >= 15 and locked_mode is None
+state == BATTLE and (now - battle_start) >= mode_lock_delay and locked_mode is None
    │
    ├─ attempt 1 ──► detect_hud_mode()
-   │     ├─ xwininfo finds "Mech Arena" ──► window id
-   │     ├─ import -window <id> -crop 440x45+740+50 png:-
+   │     ├─ xwininfo finds window.title ──► window id
+   │     ├─ import -window <id> -crop hud.crop png:-
    │     ├─ PIL converts to grayscale
    │     ├─ compute left/right edge averages and centre average
    │     ├─ ratio = centre / max(edge, 1.0)
-   │     └─ classify ──► "Deathmatch" | "Control Point Clash" | "Free-For-All" | "In Battle"
-   ├─ failure and attempts left ──► sleep 2 s, try again (up to 3 retries)
+   │     ├─ if brightness < min_brightness ──► None (failed capture)
+   │     └─ classify_hud() ──► "Deathmatch" | "Control Point Clash" | "Free-For-All" | "In Battle"
+   ├─ failure and attempts left ──► sleep lookup_retry_delay, try again (up to lookup_retries)
    └─ all attempts failed ──► leave locked_mode None, retry on the next poll
 ```
 
-Implemented by `get_mech_window_id()`, `detect_hud_mode()`, and `detect_hud_mode_with_retry()`. See [Mode Detection](Mode-Detection.md).
+Implemented by `get_mech_window_id()`, `capture_hud_image()`, `analyze_hud_image()`, `classify_hud()`, `detect_hud_mode()`, and `detect_hud_mode_with_retry()`. See [Mode Detection](Mode-Detection.md).
 
 ### 3. Presence lifecycle
 
@@ -169,11 +198,11 @@ It is a minimal reproduction of the core idea: process detection plus presence u
 
 | Loop | Interval | Work |
 | --- | --- | --- |
-| `RPCA.py` worker | 2 s | `psutil.process_iter` + one `net_connections` call per matching process. One screenshot only after the 15 s battle gate. |
+| `RPCA.py` worker | `timing.poll_interval` (2 s) | `psutil.process_iter` + one `net_connections` call per matching process. One screenshot only after the `mode_lock_delay` battle gate. |
 | `MechArena.py` worker | 3 s | Same process/UDP check, no screenshot. |
 | `TestingTools/RPCdaemon.py` | 2 s | Process/UDP check plus optional screenshot on every battle poll. |
 
-The production loop is intentionally cheap: no image work happens while in the menu, and after the mode locks no further captures happen for that match. A failed lookup can take up to 4 captures (the first attempt plus 3 retries).
+The production loop is intentionally cheap: no image work happens while in the menu, and after the mode locks no further captures happen for that match. A failed lookup can take up to `lookup_retries + 1` captures (four by default).
 
 ---
 
@@ -182,7 +211,8 @@ The production loop is intentionally cheap: no image work happens while in the m
 - `psutil.NoSuchProcess` and `psutil.AccessDenied` are ignored; iteration continues.
 - `Presence.connect()` failures set `rpc = None`, and the next poll retries.
 - `rpc.update()` calls are **not** individually wrapped. A broken connection can raise and terminate the worker; this is a known robustness gap. In practice Discord IPC failures usually happen at connect time.
-- Screenshot failures return `None`, so `detect_hud_mode_with_retry()` makes up to 3 more attempts (2 s apart). If all fail, the mode stays unlocked and the next poll starts another burst.
+- Screenshot failures return `None`, so `detect_hud_mode_with_retry()` makes up to `lookup_retries` more attempts (`lookup_retry_delay` apart). If all fail, the mode stays unlocked and the next poll starts another burst.
+- Invalid config values are reported to the log and replaced with defaults; a missing/unreadable config falls back to the built-in defaults. The daemon never refuses to start because of config.
 - `rpc.clear()` / `rpc.close()` on shutdown are wrapped in `try/except`.
 - Logging failures are swallowed; the daemon never crashes because `~/.cache` is unavailable.
 
@@ -194,11 +224,12 @@ The broad `except Exception` style favours uptime over diagnostics. The log file
 
 | Goal | Where to change |
 | --- | --- |
-| Different Discord application or asset | `CLIENT_ID`, `large_image`, `large_text` in `RPCA.py` / `MechArena.py`. |
-| Different resolution / UI scale | `HUD_CROP_GEOM`; recalibrate with `TestingTools/DumpStrip.py`. |
-| Different timing | `MODE_LOCK_DELAY`, `RESULTS_DISPLAY_DURATION`, `time.sleep(...)`. |
-| Add a mode | Extend `detect_hud_mode()` and the branch that formats `details`. |
+| Different Discord application or asset | `[discord] client_id`, `large_image`, `large_text` in the config file (or `MechArena.py`). |
+| Different resolution / UI scale | `[hud] crop`, or run the calibration wizard. |
+| Different timing | `[hud] mode_lock_delay`, `[timing] results_display_duration`, `[timing] poll_interval`. |
+| Add a mode | Extend `classify_hud()`, `settings.Config`, `[hud.thresholds]`, and the branch that formats `details`. |
 | Change tray menu | `main()` in `RPCA.py`. |
+| Add a setting | `settings.Config`, `from_mapping()`, `dump_config()`, `apply_cli_overrides()`, then `apply_config()`. |
 | Replace the tray with another UI | Keep `rpc_worker()` and `get_mech_state()`, replace `main()`. |
 
 See [Configuration](Configuration.md) for concrete examples.

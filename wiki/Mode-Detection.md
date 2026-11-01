@@ -25,8 +25,15 @@ A grayscale screenshot is fast, non-invasive, and stable enough for three coarse
 
 ## The screenshot
 
+```toml
+[hud]
+crop = "440x45+740+50"
+capture_timeout = 1.5
+```
+
+`capture_hud_image()` runs:
+
 ```python
-HUD_CROP_GEOM = "440x45+740+50"
 cmd = ["import", "-silent", "-window", win_id, "-crop", HUD_CROP_GEOM, "png:-"]
 ```
 
@@ -36,7 +43,7 @@ cmd = ["import", "-silent", "-window", win_id, "-crop", HUD_CROP_GEOM, "png:-"]
 | `+740+50` | X and Y offset inside the game window. |
 | `-window <id>` | Capture that X11/XWayland window, not the whole screen. |
 | `png:-` | Write PNG bytes to stdout, captured in memory. |
-| timeout `1.5` | A hung capture cannot stall the worker. |
+| `capture_timeout` | A hung capture cannot stall the worker. |
 
 ### Where is this region?
 
@@ -65,14 +72,16 @@ That is a horizontal band across the top-centre HUD, where the mode-specific sco
 
 ### Capture failure
 
-`detect_hud_mode()` returns `None` when:
+`capture_hud_image()` returns `None` when:
 
 - the window ID cannot be resolved,
 - `import` exits non-zero,
-- the subprocess times out,
+- the subprocess hits `hud.capture_timeout`,
 - Pillow cannot decode the bytes.
 
-`None` means "not detected", so the worker leaves `locked_mode` empty. The worker calls `detect_hud_mode_with_retry()`, which makes the first attempt plus `HUD_LOOKUP_RETRIES` (default **3**) retries, spaced by `HUD_LOOKUP_RETRY_DELAY` (default **2 seconds**). If all attempts fail, normal 2-second polling continues. It does **not** lock a wrong value on a failed lookup.
+`classify_hud()` also returns `None` when the crop is too small to analyze or when `max(center, edge) < hud.thresholds.min_brightness` (the black-frame guard).
+
+`None` means "not detected", so the worker leaves `locked_mode` empty. It calls `detect_hud_mode_with_retry()`, which makes the first attempt plus `hud.lookup_retries` (default **3**) retries, spaced by `hud.lookup_retry_delay` (default **2 seconds**). If all attempts fail, normal polling continues. It does **not** lock a wrong value on a failed lookup.
 
 ---
 
@@ -80,12 +89,19 @@ That is a horizontal band across the top-centre HUD, where the mode-specific sco
 
 The PNG is converted to 8-bit grayscale (`Image.convert("L")`), so every pixel is 0–255.
 
-With `w = 440`, `h = 45`:
+With `w = 440`, `h = 45` and the default fractions:
+
+```toml
+[hud]
+edge_fraction = 0.15
+center_start_fraction = 0.35
+center_end_fraction = 0.65
+```
 
 ```python
-edge_w       = int(w * 0.15)              # 66 px
-center_start = int(w * 0.35)              # 154
-center_end   = int(w * 0.65)              # 286
+edge_w       = int(w * edge_fraction)         # 66 px
+center_start = int(w * center_start_fraction) # 154
+center_end   = int(w * center_end_fraction)   # 286
 ```
 
 Regions:
@@ -130,25 +146,39 @@ The thresholds are empirical and may need adjustment for your GPU, resolution, H
 
 ## Decision tree
 
-The checks run **in order**; the first match wins.
+The checks run **in order**; the first match wins. They are implemented in `classify_hud()` and use the `[hud.thresholds]` config values.
 
 ```text
-                    ┌──────────────────────────────┐
-                    │ ratio <= 0.88 OR edge >= 150 │──yes──► Deathmatch
-                    └──────────────┬───────────────┘
+                    ┌──────────────────────────────────────────────┐
+                    │ ratio <= ratio_max_deathmatch                │──yes──► Deathmatch
+                    │ OR edge >= edge_min_deathmatch               │
+                    └──────────────┬───────────────────────────────┘
                                    │ no
                                    ▼
-                    ┌──────────────────────────────┐
-                    │ center >= 95 AND ratio >= 1.20│──yes──► Control Point Clash
-                    └──────────────┬───────────────┘
+                    ┌──────────────────────────────────────────────┐
+                    │ center >= center_min_cpc                     │──yes──► Control Point Clash
+                    │ AND ratio >= ratio_min_cpc                   │
+                    └──────────────┬───────────────────────────────┘
                                    │ no
                                    ▼
-                    ┌──────────────────────────────┐
-                    │ center < 95                  │──yes──► Free-For-All
-                    └──────────────┬───────────────┘
+                    ┌──────────────────────────────────────────────┐
+                    │ center < center_max_ffa                      │──yes──► Free-For-All
+                    └──────────────┬───────────────────────────────┘
                                    │ no
                                    ▼
                                "In Battle"
+```
+
+The defaults are:
+
+```toml
+[hud.thresholds]
+center_min_cpc = 95
+center_max_ffa = 95
+ratio_max_deathmatch = 0.88
+edge_min_deathmatch = 150
+ratio_min_cpc = 1.20
+min_brightness = 5
 ```
 
 Why this order?
@@ -160,25 +190,30 @@ Why this order?
 
 ### Empty / black captures
 
-If the capture is fully black, both averages are 0. `edge_avg` becomes `1.0`, `ratio` becomes `0.0`, and the first branch classifies it as **Deathmatch**. This is a real failure mode: a minimised or blocked window can produce a black frame that looks like a valid DM read. Keep the game visible, and/or add a minimum-brightness sanity check if this affects you.
+Without a guard, a fully black capture gives `center = 0`, `edge = 1.0` (clamped), and `ratio = 0.0`, so the first branch would classify it as **Deathmatch**. A minimised or blocked window can produce exactly that.
+
+`min_brightness` (default `5`) prevents it: `classify_hud()` treats any frame where both `center` and `edge` are below that value as a failed capture and returns `None`, so the retry burst runs. Set `min_brightness = 0` to disable the guard.
+
+Keep the game visible during matches regardless.
 
 ---
 
 ## Locking the result
 
-```python
-MODE_LOCK_DELAY = 15
-HUD_LOOKUP_RETRIES = 3
-HUD_LOOKUP_RETRY_DELAY = 2
+```toml
+[hud]
+mode_lock_delay = 15
+lookup_retries = 3
+lookup_retry_delay = 2
 ```
 
 On entering `STATE_BATTLE`, the worker sets `battle_start = now` and `locked_mode = None`. It publishes a generic "In Battle" presence.
 
-On a later poll, when `now - battle_start >= 15` and `locked_mode is None`, it calls `detect_hud_mode_with_retry()`:
+On a later poll, when `now - battle_start >= mode_lock_delay` and `locked_mode is None`, it calls `detect_hud_mode_with_retry()`:
 
 - If the first attempt returns a non-empty string, that string is stored in `locked_mode`, logged, and used in the presence. **It is never re-evaluated for the rest of the match.**
-- If the first attempt returns `None`, the helper retries up to `HUD_LOOKUP_RETRIES` times (default 3) with `HUD_LOOKUP_RETRY_DELAY` seconds between attempts (default 2). The first success locks the mode.
-- If every attempt fails, the helper returns `None` and the worker falls back to its normal 2-second poll for another burst of attempts.
+- If the first attempt returns `None`, the helper retries up to `lookup_retries` times (default 3) with `lookup_retry_delay` seconds between attempts (default 2). The first success locks the mode.
+- If every attempt fails, the helper returns `None` and the worker falls back to its normal `timing.poll_interval` poll for another burst of attempts.
 
 Why 15 seconds?
 
@@ -223,81 +258,93 @@ or by returning `None` instead of `"In Battle"` from the fallback. The docs desc
 
 ## Calibration
 
-If the mode is wrong or always "In Battle", calibrate the crop and thresholds for your setup.
+If the mode is wrong or always "In Battle", calibrate the crop and thresholds for your setup. The interactive wizard does the capture/preview/sample loop for you.
 
-### 1. Capture the current HUD
+### Launching the wizard
 
-```bash
-WIN=$(xwininfo -root -tree | awk '/"Mech Arena"/ {print $1; exit}')
-import -window "$WIN" -crop 440x45+740+50 /tmp/hud.png
-identify /tmp/hud.png
-```
-
-Open `/tmp/hud.png`. It should show the score/beacon strip, not empty sky or the wrong HUD element. If it is wrong, adjust `+X+Y` (and possibly `WxH`).
-
-### 2. Print a brightness profile
-
-Run `TestingTools/DumpStrip.py` (edit its hardcoded window ID first if necessary), or use the equivalent command:
+From the tray: **Calibrate HUD**. It opens a terminal running:
 
 ```bash
-python TestingTools/DumpStrip.py
+.venv/bin/python RPCA.py --config ~/.config/mech-arena-rpc/config.toml --calibrate
 ```
 
-It saves `beacon_strip_debug.png` and prints a 40-bucket ASCII profile, for example:
+Or run it directly:
 
-```text
---- Horizontal Brightness Profile (Left -> Right) ---
-[####............................####]
+```bash
+.venv/bin/python RPCA.py --calibrate
 ```
 
-Use this to see whether the centre or the edges are brighter, and whether your crop is aligned.
+It needs an interactive terminal. With redirected stdin it prints an error and exits with code 1.
 
-### 3. Collect labelled samples
+### Workflow
 
-Join each mode and run the daemon in the foreground. The log prints:
+1. Start Mech Arena and join a match. Keep the window visible.
+2. Run `show` to confirm the config path, crop, window title, and current thresholds.
+3. Run `test`. It captures the crop, prints `Center`, `Edge`, `Ratio`, the current verdict, and a 16-row ASCII brightness preview. It also saves the crop under the calibration artifact directory.
+4. If the crop is misplaced, run `preview` to save the full window with the crop outlined in red, then `open` to view it.
+5. Move/resize the crop with the nudge commands, or run `auto` to scale the 1920×1080 default to the current window.
+6. Run `test` again until the preview clearly shows the score/beacon strip and the verdict looks right.
+7. Collect labelled samples with `sample dm`, `sample cpc`, `sample ffa`, and `sample other`. Repeat across maps/lighting.
+8. Run `suggest`. It finds separations in the sample ranges and prints proposed thresholds. `apply-suggest` accepts the non-overlapping ones.
+9. `save` writes the config atomically (keeping `config.toml.bak`). Then use tray → **Reload Config**.
+10. Play a few matches in each mode and confirm the label.
+
+### Commands
+
+| Command | Effect |
+| --- | --- |
+| `test` / `t` | Capture and report stats plus an ASCII preview. |
+| `preview` / `p` | Save the full window with the crop outlined in red. |
+| `open` / `o` | Open the last preview/crop in an image viewer. |
+| `left/right/up/down [N]` | Move the crop by N pixels (default 10). |
+| `wider/narrower [N]` | Grow/shrink width around its centre. |
+| `taller/shorter [N]` | Grow/shrink height around its centre. |
+| `crop WxH+X+Y` | Set the geometry directly. |
+| `auto` | Scale the 1920×1080 default crop to the window size. |
+| `center` | Centre the crop horizontally in the window. |
+| `show` | Show the current crop and thresholds. |
+| `sample dm\|cpc\|ffa\|other` | Record the current stats as a labelled sample. |
+| `samples` | List recorded samples. |
+| `suggest` | Suggest thresholds from the samples. |
+| `apply-suggest` | Accept suggestions that have a clean gap. |
+| `set KEY VALUE` | Set a threshold (keys match the config names). |
+| `reset` | Reset crop and thresholds to defaults. |
+| `save [PATH]` | Write the config file (default: the active one). |
+| `quit` / `q` | Exit; asks to save when there are unsaved changes. |
+
+### Manual threshold editing
+
+The same values live under `[hud.thresholds]`:
+
+```toml
+[hud.thresholds]
+center_min_cpc = 95
+center_max_ffa = 95
+ratio_max_deathmatch = 0.88
+edge_min_deathmatch = 150
+ratio_min_cpc = 1.20
+min_brightness = 5
+```
+
+Pick cut-offs that separate your samples with some margin. Keep the checks ordered and keep the fallback. `min_brightness` is the black-frame guard described above.
+
+The log still prints raw values on every detection, so you can tune by hand if you prefer:
 
 ```text
 HUD Analysis: Center=118.4, Edge=71.2, Ratio(C/E)=1.66
 ```
 
-Record several values per mode, ideally from different maps and lighting conditions. A simple table helps:
+`TestingTools/DumpStrip.py` remains useful for a raw horizontal brightness profile outside the wizard.
 
-| Mode | Center | Edge | Ratio | Current verdict |
-| --- | --- | --- | --- | --- |
-| Deathmatch | | | | |
-| CPC | | | | |
-| FFA | | | | |
+### Optional: colour-based checks
 
-### 4. Adjust thresholds
-
-Edit `detect_hud_mode()` in `RPCA.py`:
-
-```python
-if ratio <= 0.88 or edge_avg >= 150:
-    return "Deathmatch"
-
-if center_avg >= 95 and ratio >= 1.20:
-    return "Control Point Clash"
-
-if center_avg < 95:
-    return "Free-For-All"
-```
-
-Pick cut-offs that separate your samples with some margin. Keep the checks ordered and keep the fallback.
-
-### 5. Validate
-
-Play a few matches in each mode and confirm the presence label. Remember that the label locks after the first successful read, so a bad early frame lasts the whole match. If intro frames are the problem, increase `MODE_LOCK_DELAY` (e.g. 20–25) rather than loosening thresholds.
-
-### 6. Optional: colour-based checks
-
-`TestingTools/InspectUHD.py` counts cyan, red, and gold pixels. If brightness alone is not separable for you, a colour ratio (e.g. cyan vs red beacons) could be added to `detect_hud_mode()`. The production daemon deliberately sticks to grayscale because it is simpler and does not assume a colour scheme.
+`TestingTools/InspectUHD.py` counts cyan, red, and gold pixels. If brightness alone is not separable for you, a colour ratio (e.g. cyan vs red beacons) could be added to `classify_hud()`. The production daemon deliberately sticks to grayscale because it is simpler and does not assume a colour scheme.
 
 ---
 
 ## Resolution and UI scaling
 
-The crop is hardcoded for 1920×1080 at 100% UI scale. If your game renders at a different size, scale the crop as a starting point:
+The default crop assumes 1920×1080 at 100% UI scale. If your game renders at a different size, the wizard's `auto` command applies this starting point:
 
 ```text
 scale = actual_width / 1920
@@ -305,7 +352,8 @@ W = round(440 * scale)
 H = round(45  * scale)
 X = round(740 * scale)
 Y = round(50  * scale)
-HUD_CROP_GEOM = f"{W}x{H}+{X}+{Y}"
+[hud]
+crop = "WxH+X+Y"
 ```
 
 Examples:
@@ -331,13 +379,14 @@ Caveats:
 | Symptom | Cause | Fix |
 | --- | --- | --- |
 | Mode never updates | Window not found or capture fails | Check `xwininfo`; keep the game visible. |
-| Always "In Battle" | Crop misaligned or ambiguous frame | Recalibrate with `DumpStrip.py`. |
-| Always "Deathmatch" | Black frame or very bright edges | Check capture; add a minimum-brightness guard. |
-| Wrong mode on some maps | Lighting/UI differences | Collect more samples and widen thresholds. |
+| Always "In Battle" | Crop misaligned or ambiguous frame | Run **Calibrate HUD**, then `test` and `suggest`. |
+| Always "Deathmatch" | Black frame or very bright edges | Check the preview; tune `min_brightness` and `edge_min_deathmatch`. |
+| Wrong mode on some maps | Lighting/UI differences | Collect more samples in the wizard and `apply-suggest`. |
 | Label flickers | Not possible in production (locked) | If using the prototype, it re-detects every poll. |
 | "In Battle (In Battle)" | Ambiguous read locked | Tune thresholds or filter the sentinel. |
-| Detection is late | 15 s lock delay | Lower `MODE_LOCK_DELAY`, accepting intro-frame risk. |
+| Detection is late | `mode_lock_delay` | Lower it, accepting intro-frame risk. |
 | Mode changes mid-match | You are running the prototype, not `RPCA.py` | Use the production daemon. |
+| Config edits ignored | Daemon has old values | Tray → **Reload Config**. |
 
 ---
 

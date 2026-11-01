@@ -1,6 +1,6 @@
 # Tray and Daemon
 
-`RPCA.py` is designed to live in the system tray, survive the terminal that launched it, and expose just enough controls to debug it. This page covers the tray UI, logging, the detach mechanism, and shutdown.
+`RPCA.py` is designed to live in the system tray, survive the terminal that launched it, and expose just enough controls to debug and tune it. This page covers the tray UI, config/calibration actions, logging, the detach mechanism, and shutdown.
 
 ---
 
@@ -69,7 +69,13 @@ It is deliberately simple and readable at small tray sizes. No file I/O, no them
 ```python
 menu = pystray.Menu(
     item(get_menu_status_text, None, enabled=False),
+    item(get_menu_stats_text, None, enabled=False),
     pystray.Menu.SEPARATOR,
+    item("Restart / Apply Update", on_restart),
+    item("Reload Config", on_reload_config),
+    item("Open Config", on_open_config),
+    item("Calibrate HUD", on_calibrate),
+    item("Reset Match Counter", on_reset_stats),
     item("Show Log", on_show_log),
     item("Dispatch (Detach Terminal)", on_dispatch, enabled=lambda item: not is_detached),
     pystray.Menu.SEPARATOR,
@@ -80,6 +86,12 @@ menu = pystray.Menu(
 | Item | Behaviour |
 | --- | --- |
 | **Status: …** | Disabled item whose label is computed at render time from `current_ui_status`. |
+| **Matches Played: …** | Disabled item showing the session match counter. |
+| **Restart / Apply Update** | Re-executes the script from disk, preserving session/match state and config CLI flags. |
+| **Reload Config** | Re-reads the TOML file and re-applies every runtime value on the next worker poll. |
+| **Open Config** | Creates the config if needed, then opens it with the default handler. |
+| **Calibrate HUD** | Launches `RPCA.py --config <path> --calibrate` in a terminal emulator. |
+| **Reset Match Counter** | Sets the session match count back to 0. |
 | **Show Log** | Opens the log file in a terminal follower or GUI editor. |
 | **Dispatch (Detach Terminal)** | Relaunches the daemon detached and exits the current process. Disabled when already detached. |
 | **Quit** | Stops the tray loop and ends the process. |
@@ -97,13 +109,59 @@ Possible status strings:
 | Status | When |
 | --- | --- |
 | `Waiting for Mech Arena...` | Initial value. |
-| `In Battle (Detecting mode...)` | Battle started, 15 s grace period running. |
+| `In Battle (Detecting mode...)` | Battle started, `mode_lock_delay` grace period running. |
 | `In Battle (Deathmatch)` etc. | Mode locked. |
-| `Viewing Results` | 10 s post-match window. |
+| `Viewing Results` | Post-match window (`results_display_duration`). |
 | `In Hangar` | Menu. |
 | `Game Closed` | Process disappeared. |
+| `Config reloaded` | After **Reload Config**. |
+| `Config reloaded (warnings)` | After **Reload Config** with validation warnings; see the log. |
 
 The status text is independent of the Discord presence; it is the tray's own view of the worker state.
+
+---
+
+## Config and calibration actions
+
+### Reload Config
+
+`on_reload_config()` calls `reload_config()`, which:
+
+1. Loads the TOML file again through `settings.load_config()`.
+2. Applies CLI overrides again.
+3. Calls `apply_config()` to refresh every runtime global.
+4. Logs each `Config:` warning.
+5. Updates the status text and sends a notification.
+
+Because `apply_config()` updates the same globals the worker reads, the new values take effect on its next poll without a restart.
+
+### Open Config
+
+`on_open_config()` creates `CONFIG_PATH` if it is missing, then tries `xdg-open`, `kate`, `kwrite`, and `gedit`. If none is available, it logs the path so you can edit it manually.
+
+### Calibrate HUD
+
+`on_calibrate()` builds:
+
+```bash
+<venv python> /abs/path/RPCA.py --config <CONFIG_PATH> --calibrate
+```
+
+and launches it through `launch_in_terminal()`. If no terminal emulator is found, the exact command is written to the log. The wizard itself is documented in [Mode Detection](Mode-Detection.md#calibration).
+
+### Terminal and opener detection
+
+`TERMINAL_COMMANDS` is tried in order:
+
+- `ghostty -e`
+- `kitty -e`
+- `alacritty -e`
+- `konsole -e`
+- `wezterm start --`
+- `xterm -e`
+- `gnome-terminal --`
+
+`open_with_default_app()` falls back to `xdg-open`, `kate`, `kwrite`, then `gedit`. Both helpers start the child in a new session and send its stdio to `/dev/null`.
 
 ---
 
@@ -111,11 +169,12 @@ The status text is independent of the Discord presence; it is the tray's own vie
 
 ### Destination
 
-```python
-LOG_FILE = Path.home() / ".cache/mech_arena_rpc.log"
+```toml
+[logging]
+file = "~/.cache/mech_arena_rpc.log"
 ```
 
-If `~/.cache` does not exist, `log()` creates the parent directories. Each line is prefixed with a local timestamp:
+`RPCA.py` loads this into `LOG_FILE`. If the parent directory does not exist, `log()` creates it. Each line is prefixed with a local timestamp:
 
 ```text
 [2026-10-31 12:34:56] Connected to Discord RPC.
@@ -127,14 +186,14 @@ If `~/.cache` does not exist, `log()` creates the parent directories. Each line 
 
 ### Behaviour by mode
 
-| | Foreground | Detached |
-| --- | --- | --- |
-| Console output | Yes (`print`) | No |
-| File output | Yes | Yes |
-| Timestamp | Yes | Yes |
-| Failure handling | Swallowed | Swallowed |
+| | Foreground | Detached | `--print-config` / `--calibrate` |
+| --- | --- | --- | --- |
+| Console output | Yes (`print`) | No | No |
+| File output | Yes | Yes | Yes |
+| Timestamp | Yes | Yes | Yes |
+| Failure handling | Swallowed | Swallowed | Swallowed |
 
-`log()` never raises. If the file cannot be written (permissions, read-only home, full disk), the daemon keeps running.
+`log()` checks `is_detached` and `cli_mode`. It never raises. If the file cannot be written (permissions, read-only home, full disk), the daemon keeps running.
 
 ### Log rotation
 
@@ -164,16 +223,11 @@ def on_show_log(icon, menu_item):
 The handler:
 
 1. Ensures the parent directory and file exist.
-2. Tries terminal followers first, in order:
-   - `ghostty -e tail -f <log>`
-   - `kitty -e tail -f <log>`
-   - `alacritty -e tail -f <log>`
-   - `konsole -e tail -f <log>`
-3. Falls back to GUI openers, in order:
-   - `kate`, `kwrite`, `gedit`, `xdg-open`
-4. If none are found, does nothing.
+2. Calls `launch_in_terminal(["tail", "-f", str(LOG_FILE)])`, which tries terminal emulators in `TERMINAL_COMMANDS` (ghostty, kitty, alacritty, konsole, wezterm, xterm, gnome-terminal).
+3. Falls back to `open_with_default_app()`, which tries `xdg-open`, `kate`, `kwrite`, `gedit`.
+4. If none are found, logs that fact.
 
-`shutil.which()` decides availability. The child process is started with `subprocess.Popen` and its stdio sent to `/dev/null`. The terminal window stays open until you close it; closing it stops `tail`, which is harmless.
+`shutil.which()` decides availability. The child process is started with `subprocess.Popen` in a new session and its stdio sent to `/dev/null`. The terminal window stays open until you close it; closing it stops `tail`, which is harmless.
 
 The GUI fallback opens the file statically; it will not auto-refresh. Re-open it or use `tail -f` for live updates.
 
@@ -195,7 +249,8 @@ Two layers:
    ```
 2. Dispatch relaunches the daemon in a **new kernel session** with no controlling terminal:
    ```python
-   args = [sys.executable, os.path.abspath(__file__), "--detached"]
+   args = [sys.executable, os.path.abspath(__file__), "--detached",
+           *persistent_cli_args(sys.argv)]
    subprocess.Popen(
        args,
        stdin=subprocess.DEVNULL,
@@ -210,6 +265,8 @@ Two layers:
    ```
 
 `start_new_session=True` calls `setsid()` in the child, detaching it from the parent's session and process group. `close_fds=True` prevents leaking file descriptors. The parent then calls `os._exit(0)` immediately, without joining threads or running `finally` blocks.
+
+`persistent_cli_args()` carries `--config`, `--crop`, `--retries`, and the other config overrides into the new process. The TOML file itself is read again by the child.
 
 ### The `--detached` flag
 
@@ -241,12 +298,14 @@ Foreground process                  New detached process
 tray menu click
   │
   ├─ Popen(self --detached,
+  │        persistent CLI flags,
   │        new session,
   │        stdio=/dev/null) ───────► starts RPCA.py
   │                                    │
   │                                    ├─ SIGHUP ignored
   │                                    ├─ stdio -> /dev/null
   │                                    ├─ PYSTRAY_BACKEND=appindicator
+  │                                    ├─ config loaded (same path/flags)
   │                                    ├─ tray + worker start
   │                                    └─ logs only to ~/.cache/...
   │
@@ -366,6 +425,12 @@ pgrep -af RPCA.py
 
 # Did it log anything?
 tail -n 50 ~/.cache/mech_arena_rpc.log
+
+# What config is it actually using?
+.venv/bin/python RPCA.py --print-config | head -20
+
+# Did the config have warnings?
+grep 'Config:' ~/.cache/mech_arena_rpc.log | tail -20
 
 # Is PyGObject importable by the venv?
 .venv/bin/python -c 'import gi; print(gi.__version__)'

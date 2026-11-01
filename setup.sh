@@ -111,7 +111,8 @@ echo "[*] Installing Python requirements..."
     pypresence \
     pillow \
     psutil \
-    pystray
+    pystray \
+    "tomli; python_version < '3.11'"
 
 echo "[+] Setup finished successfully!"
 echo "[*] Run the daemon using:"
