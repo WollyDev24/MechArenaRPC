@@ -406,7 +406,10 @@ def rpc_worker():
                     battle_start = int(now)
                     locked_mode = None
                     set_status("In Battle (Detecting mode...)")
-                    log("Status: In Battle (Waiting 15s to detect mode...)")
+                    log(
+                        "Status: In Battle "
+                        f"(Waiting {MODE_LOCK_DELAY:g}s to detect mode...)"
+                    )
 
                     rpc.update(
                         details="In Battle",

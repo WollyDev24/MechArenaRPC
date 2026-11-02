@@ -8,8 +8,9 @@ The daemon publishes presence through [`pypresence`](https://github.com/qwertyqu
 
 ### Client ID
 
-```python
-CLIENT_ID = "1565766221813776505"
+```toml
+[discord]
+client_id = "1565766221813776505"
 ```
 
 This identifies the Discord application whose name, icon, and assets are shown in the presence card. It is not a secret.
@@ -17,8 +18,10 @@ This identifies the Discord application whose name, icon, and assets are shown i
 To use your own application:
 
 1. Create an application at the Discord Developer Portal.
-2. Copy its Application ID into `CLIENT_ID`.
-3. Upload a Rich Presence asset named `mech_arena_logo` (or change the `large_image` values).
+2. Copy its Application ID into `discord.client_id`.
+3. Upload a Rich Presence asset named `mech_arena_logo` (or change `discord.large_image`).
+
+`MechArena.py` keeps its own hardcoded client ID.
 
 ### Connect
 
@@ -83,20 +86,24 @@ If Discord is installed as a sandboxed Flatpak or Snap, it may not see the same 
 All updates share:
 
 ```python
-large_image="mech_arena_logo"
-large_text="Mech Arena"
+large_image=LARGE_IMAGE
+large_text=LARGE_TEXT
 buttons=DOWNLOAD_BUTTONS
 ```
 
-where:
+where those globals are filled from:
 
-```python
-DOWNLOAD_BUTTONS = [
-    {"label": "Download Mech Arena", "url": "https://plarium.com/en/game/mech-arena/"}
-]
+```toml
+[discord]
+large_image = "mech_arena_logo"
+large_text = "Mech Arena"
+
+[[discord.buttons]]
+label = "Download Mech Arena"
+url = "https://plarium.com/en/game/mech-arena/"
 ```
 
-The `details` and `state` lines are the two text rows in the Discord card; `large_image` is the big artwork; `start` drives the elapsed-time counter.
+`DOWNLOAD_BUTTONS` becomes `None` when the button list is empty. The `details` and `state` lines are the two text rows in the Discord card; `large_image` is the big artwork; `start` drives the elapsed-time counter.
 
 ### Battle start
 
@@ -107,21 +114,21 @@ rpc.update(
     details="In Battle",
     state="Combat Session",
     start=battle_start,
-    large_image="mech_arena_logo",
-    large_text="Mech Arena",
+    large_image=LARGE_IMAGE,
+    large_text=LARGE_TEXT,
     buttons=DOWNLOAD_BUTTONS
 )
 ```
 
-### Mode locked (15 s later)
+### Mode locked (after `mode_lock_delay`)
 
 ```python
 rpc.update(
     details=f"In Battle ({locked_mode})",
     state="Combat Session",
     start=battle_start,
-    large_image="mech_arena_logo",
-    large_text="Mech Arena",
+    large_image=LARGE_IMAGE,
+    large_text=LARGE_TEXT,
     buttons=DOWNLOAD_BUTTONS
 )
 ```
@@ -137,13 +144,13 @@ rpc.update(
     details="Viewing Results",
     state=f"Post-Match{last_mode_label}",
     start=session_start,
-    large_image="mech_arena_logo",
-    large_text="Mech Arena",
+    large_image=LARGE_IMAGE,
+    large_text=LARGE_TEXT,
     buttons=DOWNLOAD_BUTTONS
 )
 ```
 
-`last_mode_label` is `" (Deathmatch)"`, `" (Control Point Clash)"`, `" (Free-For-All)"`, or an empty string if no mode was locked. The presence holds for `RESULTS_DISPLAY_DURATION = 10` seconds.
+`last_mode_label` is `" (Deathmatch)"`, `" (Control Point Clash)"`, `" (Free-For-All)"`, or an empty string if no mode was locked. The presence holds for `[timing] results_display_duration` (default 10 seconds).
 
 ### Hangar
 
@@ -154,8 +161,8 @@ rpc.update(
     details="In Hangar",
     state="Main Menu",
     start=session_start,
-    large_image="mech_arena_logo",
-    large_text="Mech Arena",
+    large_image=LARGE_IMAGE,
+    large_text=LARGE_TEXT,
     buttons=DOWNLOAD_BUTTONS
 )
 ```
@@ -186,7 +193,7 @@ Triggered when the game process disappears. `rpc.clear()` removes the card; `rpc
               │                 ▼                       │
               │          ┌─────────────┐               │
               │          │  RESULTS    │───────────────┘
-              │          │  (10 s)     │
+              │          │ (configured)│
               │          └─────────────┘
               │                 │
               └─────────────────┘ game process exits
@@ -212,7 +219,7 @@ The extra flags are:
 | `session_start` | Unix timestamp when the game was first seen. Drives the menu/results timer. |
 | `battle_start` | Unix timestamp when the current battle began. Drives the match timer. |
 | `locked_mode` | Mode string, or `None` until detected. |
-| `results_until` | Unix timestamp when the 10-second results window ends. |
+| `results_until` | Unix timestamp when the configured results window ends. |
 
 ---
 
@@ -240,7 +247,7 @@ On subsequent menu polls:
 
 - If `results_until` is `None`, normal menu handling applies.
 - If `now >= results_until`, the presence switches to "In Hangar" and `results_until` is cleared.
-- If the player starts another battle before the 10 seconds elapse, the battle branch runs and resets `results_until` to `None`.
+- If the player starts another battle before the results window elapses, the battle branch runs and resets `results_until` to `None`.
 
 The results state does not start if the daemon was already in the menu when the battle ended (e.g. it was started mid-session and missed the transition).
 
@@ -270,7 +277,7 @@ Discord rate-limits presence updates (roughly 5 updates per 20 seconds per clien
 - hangar,
 - clear on close.
 
-That is far below the limit. If you lower `time.sleep(2)` or add frequent updates, keep the rate limit in mind.
+That is far below the limit. If you lower `timing.poll_interval` or add frequent updates, keep the rate limit in mind.
 
 ---
 
@@ -278,7 +285,7 @@ That is far below the limit. If you lower `time.sleep(2)` or add frequent update
 
 ### Large image
 
-`large_image="mech_arena_logo"` refers to an asset key uploaded to the Discord application. If the asset does not exist, Discord may show a placeholder or nothing. Upload a 512×512 (or larger) image with that exact key, or change the key in all `rpc.update()` calls.
+`discord.large_image` (default `mech_arena_logo`) refers to an asset key uploaded to the Discord application. If the asset does not exist, Discord may show a placeholder or nothing. Upload a 512×512 (or larger) image with that exact key, or change `discord.large_image`.
 
 ### Buttons
 

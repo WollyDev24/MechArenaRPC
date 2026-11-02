@@ -148,7 +148,7 @@ X-GNOME-Autostart-enabled=true
 ## How It Works
 
 1. **State Polling:** `psutil` monitors for `mecharena.exe`. If the process has an active UDP network socket open, it flags the state as `IN_BATTLE`; otherwise, it assumes `IN_HANGAR`.
-2. **Mode Recognition:** 15 seconds after a battle starts, `xwininfo` grabs the XWayland window ID and ImageMagick's `import` extracts the top-center HUD strip (`440x45+740+50`). The daemon calculates the ratio between the center cluster and edge wings to mostly reliably identify **Deathmatch**, **Control Point Clash**, or **Free-For-All**.
+2. **Mode Recognition:** A configurable delay after a battle starts (`[hud] mode_lock_delay`), `xwininfo` grabs the XWayland window ID and ImageMagick's `import` extracts the top-center HUD strip from `[hud] crop`. The daemon calculates the ratio between the center cluster and edge wings to identify **Deathmatch**, **Control Point Clash**, or **Free-For-All**. Failed captures are retried up to `[hud] lookup_retries` times with `[hud] lookup_retry_delay`. A `min_brightness` guard prevents black frames from locking the wrong mode.
 3. **Presence Updates:** `pypresence` transmits the payload over Discord's local IPC pipe socket.
 
 ---
@@ -208,7 +208,7 @@ To use your own Discord application, set `client_id`. If you want the large imag
 | Symptom | Likely Cause | Fix |
 | --- | --- | --- |
 | No tray icon | AppIndicator/PyGObject missing | Install `libayatana-appindicator` + `python-gobject`; re-run `setup.sh`. |
-| "Waiting for Mech Arena..." forever | Process name mismatch | Check `pgrep -af mecharena`; compare with `"mecharena.exe"` in `get_mech_state()`. |
+| "Waiting for Mech Arena..." forever | Process name mismatch | Check `pgrep -af mecharena`; compare with `[process] name` in config. |
 | Presence never appears | Discord not running / IPC blocked | Start Discord; check `$XDG_RUNTIME_DIR/discord-ipc-*`. |
 | Presence freezes after Discord restarts | Stale IPC connection | Right-click tray → **Restart / Apply Update**. |
 | Mode always "In Battle" | HUD crop wrong for resolution/UI scale | Run **Calibrate HUD** (or `RPCA.py --calibrate`). |
@@ -216,7 +216,7 @@ To use your own Discord application, set `client_id`. If you want the large imag
 | Config file syntax error | Bad TOML value | Check `~/.cache/mech_arena_rpc.log`; the daemon falls back to defaults for invalid fields. |
 | Game is in battle but shows hangar | UDP socket missed | Verify game network activity using `ss -u -p`. |
 | Screen capture is black | Window minimized / capture denied | Keep the game visible on the XWayland display. |
-| Log viewer does nothing | No supported terminal/editor found | Install one of `ghostty`, `kitty`, `alacritty`, `konsole`, `kate`, `gedit`, or `xdg-open`. |
+| Log viewer does nothing | No supported terminal/editor found | Install one of `ghostty`, `kitty`, `alacritty`, `konsole`, `wezterm`, `xterm`, `gnome-terminal`, `kate`, `gedit`, or `xdg-open`. |
 
 ---
 

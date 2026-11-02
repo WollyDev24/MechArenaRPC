@@ -19,7 +19,10 @@ The state where `MechArena.exe` exists and has at least one open UDP socket. See
 Clickable links on a presence card. Discord allows up to two. This project uses one "Download Mech Arena" button.
 
 **Client ID**
-The Discord application ID used by `pypresence` to identify the presence. It is public, not a secret.
+The Discord application ID used by `pypresence` to identify the presence. It is public, not a secret. Configured as `discord.client_id`.
+
+**Config file**
+`~/.config/mech-arena-rpc/config.toml` (or `$XDG_CONFIG_HOME/mech-arena-rpc/config.toml`). Created on first launch and reloaded with the tray's **Reload Config** item. `--config PATH` overrides it.
 
 **Closed**
 The state where no matching game process exists (`STATE_CLOSED`).
@@ -47,10 +50,13 @@ A team mode with score plates on the wings of the HUD. Detected by bright edges 
 A free-for-all mode with a dim HUD profile. Detected when centre brightness is below 95.
 
 **HUD**
-Heads-up display: the on-screen score, beacon, and status elements. Mode detection samples a 440×45 strip at the top centre of a 1920×1080 window.
+Heads-up display: the on-screen score, beacon, and status elements. Mode detection samples a 440×45 strip at the top centre of a 1920×1080 window by default.
 
-**HUD_CROP_GEOM**
-The constant that defines the HUD crop. Default: `440x45+740+50`.
+**HUD calibration wizard**
+The interactive `RPCA.py --calibrate` flow (tray: **Calibrate HUD**) that captures the crop, previews it, records labelled samples, suggests thresholds, and saves the config.
+
+**`hud.crop`**
+The config key that defines the HUD crop. Default: `440x45+740+50`.
 
 ---
 
@@ -71,8 +77,11 @@ The state where the game process exists but has no open UDP socket (`STATE_MENU`
 **Mode**
 A game mode: Deathmatch, Control Point Clash, Free-For-All, or the generic "In Battle".
 
-**MODE_LOCK_DELAY**
-Seconds between entering battle and the first HUD read. Default: 15.
+**`min_brightness`**
+A threshold under `[hud.thresholds]`. Frames where both centre and edge brightness are below it are treated as failed captures instead of being classified. Default: 5.
+
+**`mode_lock_delay`**
+Config key (`[hud]`) for the seconds between entering battle and the first HUD read. Default: 15.
 
 ---
 
@@ -97,7 +106,7 @@ Valve's Wine-based compatibility layer for Steam. The docs say "Wine/Proton" bec
 The remote address of a socket. `TestingTools/RPCdaemon.py` requires a non-empty `raddr` to consider a UDP socket a battle; production does not.
 
 **Results window**
-The 10-second period after a battle where the presence says "Viewing Results". Controlled by `RESULTS_DISPLAY_DURATION`.
+The period after a battle where the presence says "Viewing Results". Controlled by `[timing] results_display_duration` (default 10 seconds).
 
 **Rich Presence**
 Discord's feature for displaying what a user is doing, including images and buttons.

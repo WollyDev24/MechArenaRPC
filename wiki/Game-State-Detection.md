@@ -4,7 +4,7 @@ The daemon needs to answer one question every couple of seconds: **is Mech Arena
 
 It uses two signals only:
 
-1. Does a process named like `mecharena.exe` exist?
+1. Does a process matching `[process] name` exist (default `mecharena.exe`)?
 2. Does that process have any open UDP sockets?
 
 No window titles, CPU usage, or memory reads are involved.
@@ -34,7 +34,7 @@ def get_mech_state():
     for proc in psutil.process_iter(['name']):
         try:
             name = proc.info['name']
-            if name and "mecharena.exe" in name.lower():
+            if name and PROCESS_NAME.lower() in name.lower():
                 connections = proc.net_connections(kind='udp')
                 if len(connections) > 0:
                     return STATE_BATTLE
@@ -44,10 +44,12 @@ def get_mech_state():
     return STATE_CLOSED
 ```
 
+`PROCESS_NAME` comes from `[process] name` in the config.
+
 ### Step by step
 
 1. **Iterate all processes.** `psutil.process_iter(['name'])` is a reasonably cheap generator. Only the `name` field is requested, so psutil does not read the full process metadata.
-2. **Match the game process.** `"mecharena.exe" in name.lower()` accepts `MechArena.exe`, `mecharena.exe`, and any decorated name such as `MechArena.exe` as reported by Wine. The `.exe` suffix is important: it avoids matching unrelated processes that merely contain "mecharena".
+2. **Match the game process.** The configured substring is compared case-insensitively, so `mecharena.exe` accepts `MechArena.exe` and similar Wine-reported names. Keeping the `.exe` suffix avoids matching unrelated processes that merely contain "mecharena".
 3. **First match wins.** The function returns as soon as it finds a matching process. If several exist (rare, e.g. a stale Wine process), the first one encountered decides the state.
 4. **Read UDP sockets.** `proc.net_connections(kind='udp')` returns UDP endpoints owned by that process. If the list is non-empty, assume a battle.
 5. **Handle permission errors.** Other users' processes can raise `AccessDenied`. Those are skipped. A matching game process that raises `AccessDenied` is effectively ignored, and detection may fall through to `STATE_CLOSED`. Run the daemon as the same user that runs Wine to avoid this.
@@ -106,21 +108,21 @@ Important detail: `last_state` is only updated inside `if rpc is not None:`. If 
 
 ## Window discovery
 
-Mode detection needs the game window even though state detection does not. `get_mech_window_id()` runs `xwininfo -root -tree` and scans for a line containing `"Mech Arena"`:
+Mode detection needs the game window even though state detection does not. `get_mech_window_id()` runs `xwininfo -root -tree` and scans for a line containing the configured `[window] title` (default `"Mech Arena"`):
 
 ```text
 0x4a00001 "Mech Arena": ("mecharena.exe" "MechArena.exe")  1920x1080+0+0  +0+0
 ```
 
-It extracts the first hexadecimal token via `re.search(r'(0x[0-9a-fA-F]+)', line)`.
+It extracts the first hexadecimal token via `re.search(r"(0x[0-9a-fA-F]+)", line)`.
 
 Notes:
 
-- The title must be exactly `Mech Arena` (case-sensitive) in the current implementation.
+- The title match is exact and case-sensitive, and includes the surrounding quotes.
 - On Wayland, Wine windows are exposed through XWayland, so `xwininfo` can see them.
 - If the game runs in a Wine virtual desktop, the outer window may have a different title or size.
 - If multiple windows match, the first one in tree order is used. A splash screen with the same title could be selected.
-- The function is only called after the 15-second battle delay, so transient loading windows are usually gone by then.
+- The function is only called after the `mode_lock_delay` battle delay, so transient loading windows are usually gone by then.
 
 Manual check:
 
@@ -128,7 +130,7 @@ Manual check:
 xwininfo -root -tree | grep -i 'Mech Arena'
 ```
 
-If that prints nothing, window lookup fails, so each HUD burst logs three retries and then leaves mode detection unlocked for the next poll.
+If that prints nothing, window lookup fails, so each HUD burst logs `lookup_retries` retries and then leaves mode detection unlocked for the next poll.
 
 ---
 
@@ -189,10 +191,10 @@ tail -f ~/.cache/mech_arena_rpc.log
 
 | Behaviour | `RPCA.py` / `MechArena.py` | `TestingTools/RPCdaemon.py` |
 | --- | --- | --- |
-| Matching process | `"mecharena.exe" in name.lower()` | `"mecharena" in name.lower()` |
+| Matching process | configured `[process] name` (default `mecharena.exe`) | `"mecharena" in name.lower()` |
 | UDP condition | `len(connections) > 0` | at least one socket with `conn.raddr` |
-| Poll interval | 2 s (`RPCA.py`), 3 s (`MechArena.py`) | 2 s |
-| HUD detection | Once, after 15 s, then locked | On every battle poll |
+| Poll interval | `timing.poll_interval` (2 s), `MechArena.py` 3 s | 2 s |
+| HUD detection | Once, after `mode_lock_delay`, then locked | On every battle poll |
 | Output | Discord presence + log | Console state changes |
 
 The prototype was used to calibrate the screen heuristics. It is a useful diagnostic tool when the production daemon's state disagrees with what you see.
@@ -208,7 +210,7 @@ The prototype was used to calibrate the screen heuristics. It is a useful diagno
 | UDP socket opens in the launcher | False "battle" | Use the prototype's `raddr` check. |
 | Socket stays open after the match | Longer "battle" state | Wait for it to close, or add a timeout. |
 | Game uses TCP only | Never enters battle | Extend the socket check. |
-| Window title changes | Mode detection fails | Update the title string in `get_mech_window_id()`. |
+| Window title changes | Mode detection fails | Update `[window] title`. |
 | Game minimised | Screenshot may be black or fail | Keep the game visible on the XWayland display. |
 | Wine virtual desktop | Crop coordinates may shift | Capture the virtual desktop or adjust the crop. |
 | Multiple matching windows | Wrong window captured | Make the title match more specific. |

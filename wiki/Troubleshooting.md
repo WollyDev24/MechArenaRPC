@@ -341,6 +341,8 @@ if last_state == STATE_BATTLE:
     results_until = now + RESULTS_DISPLAY_DURATION
 ```
 
+`RESULTS_DISPLAY_DURATION` comes from `[timing] results_display_duration`.
+
 Common causes:
 
 | Cause | Explanation |
@@ -348,8 +350,8 @@ Common causes:
 | Daemon started while already in the menu | It never saw the battle state. |
 | UDP socket closed before the match ended | The transition happened earlier than expected. |
 | Discord was disconnected during the transition | `last_state` updates only when `rpc` is connected. |
-| Match ended and a new one started within 10 s | The battle branch clears the results timer. |
-| `RESULTS_DISPLAY_DURATION` set to 0 | The window expires immediately. |
+| Match ended and a new one started within the results window | The battle branch clears the results timer. |
+| `results_display_duration` set to 0 | The window expires immediately. |
 
 The results card uses `session_start`, so the timer continues from the session rather than resetting.
 
@@ -357,21 +359,24 @@ The results card uses `session_start`, so the timer continues from the session r
 
 ## Show Log does nothing
 
-`on_show_log()` tries terminals in this order:
+`on_show_log()` calls `launch_in_terminal(["tail", "-f", LOG_FILE])`, which tries terminals in this order:
 
 1. `ghostty`
 2. `kitty`
 3. `alacritty`
 4. `konsole`
+5. `wezterm`
+6. `xterm`
+7. `gnome-terminal`
 
-Then GUI openers:
+Then `open_with_default_app()` tries GUI openers:
 
-1. `kate`
-2. `kwrite`
-3. `gedit`
-4. `xdg-open`
+1. `xdg-open`
+2. `kate`
+3. `kwrite`
+4. `gedit`
 
-If none are installed, the handler returns silently. Install one, or read the log manually:
+If none are installed, the handler logs that fact. Install one, or read the log manually:
 
 ```bash
 tail -f ~/.cache/mech_arena_rpc.log
@@ -380,7 +385,7 @@ tail -f ~/.cache/mech_arena_rpc.log
 Check `shutil.which` visibility from the daemon's environment:
 
 ```bash
-for c in ghostty kitty alacritty konsole kate kwrite gedit xdg-open; do
+for c in ghostty kitty alacritty konsole wezterm xterm gnome-terminal xdg-open kate kwrite gedit; do
   command -v "$c" && echo "  ^ $c"
 done
 ```
@@ -516,14 +521,15 @@ They read tens of megabytes per mapping. Expect seconds, not milliseconds. Close
 
 The production daemon is light:
 
-- One `psutil.process_iter` and one `net_connections` call every 2 seconds.
-- One `import` screenshot per match, 15 seconds after the battle starts.
+- One `psutil.process_iter` and one `net_connections` call every `timing.poll_interval` (2 seconds by default).
+- One `import` screenshot per match, `hud.mode_lock_delay` seconds after the battle starts.
 - A handful of Discord updates per match.
 
 If you see CPU usage, check for:
 
 - Multiple daemon instances (`pgrep -af RPCA.py`).
-- A tiny poll interval you introduced.
+- A tiny `poll_interval` you set in the config.
+- A large `hud.crop` or extreme threshold sampling (unlikely).
 - Running `TestingTools/RPCdaemon.py` in parallel (it screenshots every battle poll).
 - A very large number of processes making `process_iter` expensive.
 
@@ -549,30 +555,35 @@ The production heuristic treats any UDP socket as a battle. The prototype's `rad
 Battle presence uses `battle_start`; menu/results use `session_start`. A new match resets the battle timer.
 
 **Can I show the mode icon instead of the logo?**
-Yes, in principle: extract icons with `StripAssets.py`, upload them as Discord assets, and choose `large_image` based on `locked_mode`. The current code always uses `mech_arena_logo`.
+Yes, in principle: extract icons with `StripAssets.py`, upload them as Discord assets, and choose `large_image` based on `locked_mode`. The current code always uses `discord.large_image`.
 
 **Can I make it start at login?**
 Yes. See [Tray and Daemon → Autostart](Tray-and-Daemon.md#autostart).
 
 **Can I use my own Discord app?**
-Yes. Replace `CLIENT_ID` and upload an asset named `mech_arena_logo`, or change the asset key.
+Yes. Set `discord.client_id`, upload an asset, and point `discord.large_image` at it.
 
-**Why is there no config file?**
-Configuration is intentionally minimal and hardcoded. Edit the constants at the top of the scripts.
+**Where is the config file?**
+`~/.config/mech-arena-rpc/config.toml`, created on first launch. Use `--config PATH` to override. See [Configuration](Configuration.md).
+
+**Why does `MechArena.py` ignore my config?**
+It is the minimal variant and keeps its own hardcoded constants. `RPCA.py` is the config-aware daemon.
 
 ---
 
 ## Known limitations
 
 - Linux + X11/XWayland only.
-- The HUD crop assumes 1920×1080 and 100% UI scale by default.
-- Mode detection is a one-shot heuristic with 15 s delay; a bad read lasts the match.
+- The default HUD crop assumes 1920×1080 and 100% UI scale; use the calibration wizard otherwise.
+- Mode detection is a one-shot heuristic with a configurable lock delay; a bad read lasts the match.
+- `min_brightness` rejects black frames, but very dim real HUD frames can also be rejected.
 - Any UDP socket counts as a battle in production.
 - Results state requires an observed battle-to-menu transition.
 - No automatic re-detection of the mode within a match.
 - No log rotation.
 - Tray requires AppIndicator/PyGObject.
 - Sandboxed Discord installs may block IPC.
+- `MechArena.py` does not read the config file.
 - Research tools may need root and can break with game updates.
 
 ---
